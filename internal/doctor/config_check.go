@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/constants"
@@ -846,6 +847,7 @@ func (c *CustomStatusesCheck) Fix(ctx *CheckContext) error {
 	for s := range statusSet {
 		merged = append(merged, s)
 	}
+	sort.Strings(merged)
 
 	cmd := exec.Command("bd", "config", "set", "status.custom", strings.Join(merged, ","))
 	cmd.Dir = c.townRoot

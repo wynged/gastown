@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -190,6 +191,11 @@ func EnsureCustomStatuses(beadsDir string) error {
 		return fmt.Errorf("beads directory does not exist: %s", beadsDir)
 	}
 
+	// Check if database exists and initialize if needed
+	if err := ensureDatabaseInitialized(beadsDir); err != nil {
+		return fmt.Errorf("ensure database initialized: %w", err)
+	}
+
 	// Read current custom statuses and merge with required ones
 	getCmd := exec.Command("bd", "config", "get", "status.custom")
 	getCmd.Dir = beadsDir
@@ -210,11 +216,12 @@ func EnsureCustomStatuses(beadsDir string) error {
 		statusSet[s] = true
 	}
 
-	// Build merged list
+	// Build merged list (sorted for deterministic output)
 	var merged []string
 	for s := range statusSet {
 		merged = append(merged, s)
 	}
+	sort.Strings(merged)
 	mergedStr := strings.Join(merged, ",")
 
 	// Configure custom statuses via bd CLI
