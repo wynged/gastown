@@ -1297,10 +1297,11 @@ func buildGatedJSON(gated []GatedTask, dag *ConvoyDAG) []GatedTaskJSON {
 
 // bdShowResult matches the JSON output of `bd show <id> --json`.
 type bdShowResult struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	IssueType string `json:"issue_type"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	IssueType   string `json:"issue_type"`
+	Description string `json:"description"`
 }
 
 // bdDepResult matches the JSON output of `bd dep list <id> --json`.

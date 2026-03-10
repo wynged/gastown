@@ -84,6 +84,7 @@ var (
 	convoyLandForce    bool
 	convoyLandKeep     bool
 	convoyLandDryRun   bool
+	convoyBaseBranch   string
 )
 
 const (
@@ -220,7 +221,8 @@ Examples:
   gt convoy create "Feature rollout" gt-a gt-b --owner mayor/ --notify ops/
   gt convoy create "Feature rollout" gt-a gt-b gt-c --molecule mol-release
   gt convoy create --owned "Manual deploy" gt-abc           # caller-managed lifecycle
-  gt convoy create "Quick fix" gt-abc --merge=direct        # bypass refinery`,
+  gt convoy create "Quick fix" gt-abc --merge=direct        # bypass refinery
+  gt convoy create "AI Suggestions" pr-a pr-b --base-branch feat/ai-suggestions  # feature branch`,
 	Args: cobra.MinimumNArgs(1),
 	SilenceUsage: true,
 	RunE:         runConvoyCreate,
@@ -366,6 +368,7 @@ func init() {
 	convoyCreateCmd.Flags().Lookup("notify").NoOptDefVal = "mayor/"
 	convoyCreateCmd.Flags().BoolVar(&convoyOwned, "owned", false, "Mark convoy as caller-managed lifecycle (no automatic witness/refinery registration)")
 	convoyCreateCmd.Flags().StringVar(&convoyMerge, "merge", "", "Merge strategy: direct (push to main), mr (merge queue, default), local (keep on branch)")
+	convoyCreateCmd.Flags().StringVar(&convoyBaseBranch, "base-branch", "", "Target branch for all convoy work (polecats branch from and merge into this branch)")
 
 	// Status flags
 	convoyStatusCmd.Flags().BoolVar(&convoyStatusJSON, "json", false, "Output as JSON")
@@ -494,10 +497,11 @@ func runConvoyCreate(cmd *cobra.Command, args []string) error {
 		owner = detectSender()
 	}
 	convoyFieldValues := &beads.ConvoyFields{
-		Owner:    owner,
-		Notify:   convoyNotify,
-		Merge:    convoyMerge,
-		Molecule: convoyMolecule,
+		Owner:      owner,
+		Notify:     convoyNotify,
+		Merge:      convoyMerge,
+		Molecule:   convoyMolecule,
+		BaseBranch: convoyBaseBranch,
 	}
 	description = beads.SetConvoyFields(&beads.Issue{Description: description}, convoyFieldValues)
 
@@ -574,6 +578,9 @@ func runConvoyCreate(cmd *cobra.Command, args []string) error {
 	}
 	if convoyMolecule != "" {
 		fmt.Printf("  Molecule: %s\n", convoyMolecule)
+	}
+	if convoyBaseBranch != "" {
+		fmt.Printf("  Branch:   %s\n", convoyBaseBranch)
 	}
 	if convoyOwned {
 		fmt.Printf("  Owned:    %s\n", style.Warning.Render("caller-managed lifecycle"))
@@ -1657,9 +1664,15 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 			Owned         bool               `json:"owned"`
 			Lifecycle     string             `json:"lifecycle"`
 			MergeStrategy string             `json:"merge_strategy,omitempty"`
+			BaseBranch    string             `json:"base_branch,omitempty"`
 			Tracked       []trackedIssueInfo `json:"tracked"`
 			Completed     int                `json:"completed"`
 			Total         int                `json:"total"`
+		}
+		convoyFields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description})
+		var baseBranch string
+		if convoyFields != nil {
+			baseBranch = convoyFields.BaseBranch
 		}
 		out := jsonStatus{
 			ID:            convoy.ID,
@@ -1668,6 +1681,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 			Owned:         isOwned,
 			Lifecycle:     lifecycle,
 			MergeStrategy: convoyMergeFromFields(convoy.Description),
+			BaseBranch:    baseBranch,
 			Tracked:       tracked,
 			Completed:     completed,
 			Total:         len(tracked),
@@ -1689,6 +1703,9 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 	merge := convoyMergeFromFields(convoy.Description)
 	if merge != "" {
 		fmt.Printf("  Merge:     %s\n", merge)
+	}
+	if statusConvoyFields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); statusConvoyFields != nil && statusConvoyFields.BaseBranch != "" {
+		fmt.Printf("  Branch:    %s\n", style.Bold.Render(statusConvoyFields.BaseBranch))
 	}
 	fmt.Printf("  Progress:  %d/%d completed\n", completed, len(tracked))
 	fmt.Printf("  Created:   %s\n", convoy.CreatedAt)

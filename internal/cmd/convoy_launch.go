@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -25,8 +26,12 @@ type DispatchResult struct {
 // dispatchTaskDirect dispatches a single task to its rig.
 // In production, this delegates to gt sling. Tests override this variable
 // with a stub to avoid spawning real processes.
-var dispatchTaskDirect = func(townRoot, beadID, rig string) error {
-	cmd := exec.Command("gt", "sling", beadID, rig)
+var dispatchTaskDirect = func(townRoot, beadID, rig, baseBranch string) error {
+	args := []string{"sling", beadID, rig}
+	if baseBranch != "" {
+		args = append(args, "--base-branch", baseBranch)
+	}
+	cmd := exec.Command("gt", args...)
 	cmd.Dir = townRoot
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -159,7 +164,7 @@ func checkBlockedRigsForLaunch(dag *ConvoyDAG, townRoot string, force bool) erro
 // Individual task failures do not abort remaining dispatches (I-14).
 // Returns a result for every Wave 1 task and a non-nil error only if waves
 // are empty or contain no Wave 1.
-func dispatchWave1(convoyID string, dag *ConvoyDAG, waves []Wave, townRoot string) ([]DispatchResult, error) {
+func dispatchWave1(convoyID string, dag *ConvoyDAG, waves []Wave, townRoot, baseBranch string) ([]DispatchResult, error) {
 	if len(waves) == 0 {
 		return nil, fmt.Errorf("convoy %s: no waves to dispatch", convoyID)
 	}
@@ -177,7 +182,7 @@ func dispatchWave1(convoyID string, dag *ConvoyDAG, waves []Wave, townRoot strin
 			rig = node.Rig
 		}
 
-		err := dispatchTaskDirect(townRoot, taskID, rig)
+		err := dispatchTaskDirect(townRoot, taskID, rig, baseBranch)
 		results = append(results, DispatchResult{
 			BeadID:  taskID,
 			Rig:     rig,
@@ -263,6 +268,19 @@ func renderLaunchOutput(convoyID string, waves []Wave, results []DispatchResult,
 	return b.String()
 }
 
+// getConvoyBaseBranch extracts the base_branch from a convoy's description fields.
+// Returns empty string if no base branch is configured.
+func getConvoyBaseBranch(result *bdShowResult) string {
+	if result == nil || result.Description == "" {
+		return ""
+	}
+	fields := beads.ParseConvoyFields(&beads.Issue{Description: result.Description})
+	if fields == nil {
+		return ""
+	}
+	return fields.BaseBranch
+}
+
 // runConvoyLaunch is the handler for `gt convoy launch`.
 func runConvoyLaunch(cmd *cobra.Command, args []string) error {
 	// Step 1: Validate args.
@@ -313,7 +331,10 @@ func runConvoyLaunch(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			results, err := dispatchWave1(convoyID, dag, waves, townRoot)
+			// Read convoy's base branch for feature branch support
+			convoyBaseBranch := getConvoyBaseBranch(result)
+
+			results, err := dispatchWave1(convoyID, dag, waves, townRoot, convoyBaseBranch)
 			if err != nil {
 				return fmt.Errorf("dispatch wave 1: %w", err)
 			}

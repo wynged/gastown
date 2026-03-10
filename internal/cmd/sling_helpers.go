@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -262,6 +263,7 @@ type beadFieldUpdates struct {
 	ConvoyID         string // Convoy bead ID (e.g., "hq-cv-abc")
 	MergeStrategy    string // Convoy merge strategy: "direct", "mr", "local"
 	ConvoyOwned      bool   // Convoy has gt:owned label (caller-managed lifecycle)
+	BaseBranch       string // Target branch for this work (from convoy or --base-branch)
 }
 
 // storeFieldsInBead performs a single read-modify-write to update all attachment fields
@@ -332,6 +334,9 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	}
 	if updates.ConvoyOwned {
 		fields.ConvoyOwned = true
+	}
+	if updates.BaseBranch != "" {
+		fields.BaseBranch = updates.BaseBranch
 	}
 
 	// Write back once
@@ -1167,4 +1172,66 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 	if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{Mode: &mode}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s mode: %v\n", agentBeadID, err)
 	}
+}
+
+// resolveConvoyBaseBranch checks if a bead belongs to a convoy that has a
+// base_branch configured. Returns the convoy's base branch or empty string.
+// This enables convoy-level feature branch support: all beads in a convoy
+// automatically inherit the convoy's target branch without needing explicit
+// --base-branch on each gt sling call.
+func resolveConvoyBaseBranch(beadID string) string {
+	// Read the bead's description to check attachment fields
+	showCmd := exec.Command("bd", "show", beadID, "--json")
+	var stdout bytes.Buffer
+	showCmd.Stdout = &stdout
+	if err := showCmd.Run(); err != nil || stdout.Len() == 0 {
+		return ""
+	}
+
+	type beadWithDesc struct {
+		Description string `json:"description"`
+	}
+	var items []beadWithDesc
+	if err := json.Unmarshal(stdout.Bytes(), &items); err != nil || len(items) == 0 {
+		return ""
+	}
+
+	desc := items[0].Description
+	if desc == "" {
+		return ""
+	}
+
+	// Check bead's own attachment fields for base_branch first
+	attachFields := beads.ParseAttachmentFields(&beads.Issue{Description: desc})
+	if attachFields != nil && attachFields.BaseBranch != "" {
+		return attachFields.BaseBranch
+	}
+
+	// No direct base_branch — check convoy
+	convoyID := ""
+	if attachFields != nil && attachFields.ConvoyID != "" {
+		convoyID = attachFields.ConvoyID
+	}
+	if convoyID == "" {
+		return ""
+	}
+
+	// Read convoy's fields
+	convoyCmd := exec.Command("bd", "show", convoyID, "--json")
+	var convoyStdout bytes.Buffer
+	convoyCmd.Stdout = &convoyStdout
+	if err := convoyCmd.Run(); err != nil || convoyStdout.Len() == 0 {
+		return ""
+	}
+
+	var convoyItems []beadWithDesc
+	if err := json.Unmarshal(convoyStdout.Bytes(), &convoyItems); err != nil || len(convoyItems) == 0 {
+		return ""
+	}
+
+	convoyFields := beads.ParseConvoyFields(&beads.Issue{Description: convoyItems[0].Description})
+	if convoyFields == nil {
+		return ""
+	}
+	return convoyFields.BaseBranch
 }

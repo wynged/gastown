@@ -642,6 +642,13 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	// If no explicit --base-branch, check if bead has a convoy with a base_branch
+	if slingBaseBranch == "" {
+		if cb := resolveConvoyBaseBranch(beadID); cb != "" {
+			slingBaseBranch = cb
+		}
+	}
+
 	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
 	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
 	// and scheduler dispatch already use the unified path. Single-sling is deferred
@@ -922,6 +929,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		AttachedMolecule: attachedMoleculeID,
 		AttachedFormula:  formulaName,
 		NoMerge:          slingNoMerge,
+		BaseBranch:       slingBaseBranch,
 	}
 	if err := storeFieldsInBead(beadID, fieldUpdates); err != nil {
 		// Warn but don't fail - polecat will still complete work

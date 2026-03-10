@@ -752,6 +752,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 		}
 
+		// Check attachment fields for convoy base_branch (feature branch support)
+		if target == defaultBranch {
+			if sourceIssue, err := bd.Show(issueID); err == nil {
+				if af := beads.ParseAttachmentFields(sourceIssue); af != nil && af.BaseBranch != "" {
+					target = af.BaseBranch
+				}
+			}
+		}
+
 		// Get source issue for priority inheritance
 		var priority int
 		if donePriority >= 0 {

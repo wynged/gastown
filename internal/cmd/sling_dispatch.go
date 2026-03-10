@@ -325,7 +325,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	// 9. Update agent hook_bead state
 	updateAgentHookBead(targetAgent, beadToHook, hookWorkDir, beadsDir)
 
-	// 10. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode)
+	// 10. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode, base_branch)
 	fieldUpdates := beadFieldUpdates{
 		Dispatcher:       actor,
 		Args:             params.Args,
@@ -333,6 +333,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		AttachedFormula:  params.FormulaName,
 		NoMerge:          params.NoMerge,
 		Mode:             params.Mode,
+		BaseBranch:       params.BaseBranch,
 	}
 	// Use beadToHook for the update target (may differ from beadID when formula-on-bead)
 	if err := storeFieldsInBead(beadToHook, fieldUpdates); err != nil {
