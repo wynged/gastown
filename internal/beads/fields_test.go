@@ -283,8 +283,8 @@ func TestFormatConvoyFields(t *testing.T) {
 		},
 		{
 			name:   "all fields",
-			fields: &ConvoyFields{Owner: "mayor/", Notify: "witness/", Merge: "direct", Molecule: "gt-wisp-abc"},
-			want:   "Owner: mayor/\nNotify: witness/\nMerge: direct\nMolecule: gt-wisp-abc",
+			fields: &ConvoyFields{Owner: "mayor/", Notify: "witness/", Merge: "direct", Molecule: "gt-wisp-abc", BaseBranch: "feat/xyz"},
+			want:   "Owner: mayor/\nNotify: witness/\nMerge: direct\nMolecule: gt-wisp-abc\nbase_branch: feat/xyz",
 		},
 		{
 			name:   "only merge",
@@ -369,6 +369,140 @@ func TestConvoyFieldsParseFormatRoundTrip(t *testing.T) {
 	}
 	if parsed.Molecule != original.Molecule {
 		t.Errorf("Molecule: got %q, want %q", parsed.Molecule, original.Molecule)
+	}
+}
+
+func TestConvoyFieldsBaseBranchRoundTrip(t *testing.T) {
+	original := &ConvoyFields{
+		Owner:      "mayor/",
+		Merge:      "mr",
+		BaseBranch: "feat/my-feature",
+	}
+	formatted := FormatConvoyFields(original)
+	if !strings.Contains(formatted, "base_branch: feat/my-feature") {
+		t.Errorf("FormatConvoyFields missing base_branch, got:\n%s", formatted)
+	}
+
+	parsed := ParseConvoyFields(&Issue{Description: formatted})
+	if parsed == nil {
+		t.Fatal("round-trip parse returned nil")
+	}
+	if parsed.BaseBranch != original.BaseBranch {
+		t.Errorf("BaseBranch: got %q, want %q", parsed.BaseBranch, original.BaseBranch)
+	}
+	if parsed.Owner != original.Owner {
+		t.Errorf("Owner: got %q, want %q", parsed.Owner, original.Owner)
+	}
+	if parsed.Merge != original.Merge {
+		t.Errorf("Merge: got %q, want %q", parsed.Merge, original.Merge)
+	}
+}
+
+func TestConvoyFieldsBaseBranchEmpty(t *testing.T) {
+	// Empty BaseBranch should not appear in formatted output
+	fields := &ConvoyFields{Merge: "direct"}
+	got := FormatConvoyFields(fields)
+	if strings.Contains(got, "base_branch") {
+		t.Errorf("FormatConvoyFields should not include base_branch when empty, got:\n%s", got)
+	}
+}
+
+func TestParseConvoyFieldsBaseBranchOnly(t *testing.T) {
+	parsed := ParseConvoyFields(&Issue{Description: "base_branch: develop"})
+	if parsed == nil {
+		t.Fatal("parse returned nil for base_branch-only description")
+	}
+	if parsed.BaseBranch != "develop" {
+		t.Errorf("BaseBranch: got %q, want %q", parsed.BaseBranch, "develop")
+	}
+}
+
+func TestSetConvoyFieldsWithBaseBranch(t *testing.T) {
+	tests := []struct {
+		name   string
+		issue  *Issue
+		fields *ConvoyFields
+		want   string
+	}{
+		{
+			name:   "adds base_branch to new convoy",
+			issue:  &Issue{Description: "Auto-created convoy tracking gt-abc"},
+			fields: &ConvoyFields{Merge: "mr", BaseBranch: "feat/auth-refactor"},
+			want:   "Auto-created convoy tracking gt-abc\nMerge: mr\nbase_branch: feat/auth-refactor",
+		},
+		{
+			name:   "replaces existing base_branch",
+			issue:  &Issue{Description: "Convoy prose\nbase_branch: old-branch\nMerge: mr"},
+			fields: &ConvoyFields{Merge: "mr", BaseBranch: "new-branch"},
+			want:   "Convoy prose\nMerge: mr\nbase_branch: new-branch",
+		},
+		{
+			name:   "removes base_branch when empty",
+			issue:  &Issue{Description: "Convoy prose\nbase_branch: old-branch\nMerge: mr"},
+			fields: &ConvoyFields{Merge: "mr"},
+			want:   "Convoy prose\nMerge: mr",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SetConvoyFields(tt.issue, tt.fields)
+			if got != tt.want {
+				t.Errorf("SetConvoyFields() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConvoyFieldsAllFieldsIncludingBaseBranch(t *testing.T) {
+	original := &ConvoyFields{
+		Owner:      "mayor/",
+		Notify:     "witness/",
+		Merge:      "direct",
+		Molecule:   "gt-wisp-abc",
+		BaseBranch: "release/v2",
+	}
+	formatted := FormatConvoyFields(original)
+
+	// Verify all fields present
+	for _, expected := range []string{
+		"Owner: mayor/",
+		"Notify: witness/",
+		"Merge: direct",
+		"Molecule: gt-wisp-abc",
+		"base_branch: release/v2",
+	} {
+		if !strings.Contains(formatted, expected) {
+			t.Errorf("FormatConvoyFields missing %q, got:\n%s", expected, formatted)
+		}
+	}
+
+	// Round-trip
+	parsed := ParseConvoyFields(&Issue{Description: formatted})
+	if parsed == nil {
+		t.Fatal("round-trip parse returned nil")
+	}
+	if parsed.BaseBranch != original.BaseBranch {
+		t.Errorf("BaseBranch: got %q, want %q", parsed.BaseBranch, original.BaseBranch)
+	}
+}
+
+func TestSetConvoyFieldsBaseBranchWithMixedContent(t *testing.T) {
+	issue := &Issue{Description: "Convoy tracking 3 issues\nOwner: old/\nSome prose line\nbase_branch: old-branch\nMerge: local"}
+	fields := &ConvoyFields{Owner: "new/", Merge: "direct", BaseBranch: "feat/new-branch"}
+	got := SetConvoyFields(issue, fields)
+
+	// Should preserve non-convoy prose
+	if !strings.Contains(got, "Some prose line") {
+		t.Errorf("lost prose line, got:\n%s", got)
+	}
+	// Should have new fields
+	if !strings.Contains(got, "base_branch: feat/new-branch") {
+		t.Errorf("missing new base_branch, got:\n%s", got)
+	}
+	// Should NOT have old fields
+	if strings.Contains(got, "base_branch: old-branch") {
+		t.Errorf("still has old base_branch, got:\n%s", got)
 	}
 }
 

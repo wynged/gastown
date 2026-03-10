@@ -243,11 +243,19 @@ func getConvoyInfoFromIssue(issueID, cwd string) *ConvoyInfo {
 	}
 }
 
+// resolveConvoyBaseBranchFn is the function variable for resolveConvoyBaseBranch,
+// allowing tests to inject a mock without shelling out to bd.
+var resolveConvoyBaseBranchFn = resolveConvoyBaseBranchImpl
+
 // resolveConvoyBaseBranch looks up the base_branch for a bead by checking its
 // convoy membership. Returns the convoy's base_branch if found, empty string otherwise.
 // This allows gt sling to auto-propagate the feature branch from a convoy without
 // requiring --base-branch on every dispatch.
 func resolveConvoyBaseBranch(beadID string) string {
+	return resolveConvoyBaseBranchFn(beadID)
+}
+
+func resolveConvoyBaseBranchImpl(beadID string) string {
 	convoyID := isTrackedByConvoy(beadID)
 	if convoyID == "" {
 		return ""
