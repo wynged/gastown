@@ -652,6 +652,15 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Resolve target agent using shared dispatch logic.
 	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
 	// with rig last arg) exits at line 234. The only remaining case is len(args) <= 2.
+	// Resolve base_branch from convoy if not explicitly set (gt-wg6).
+	effectiveBaseBranch := slingBaseBranch
+	if effectiveBaseBranch == "" {
+		if convoyBranch := resolveConvoyBaseBranch(beadID); convoyBranch != "" {
+			effectiveBaseBranch = convoyBranch
+			fmt.Printf("%s Using base_branch %q from convoy\n", style.Dim.Render("○"), convoyBranch)
+		}
+	}
+
 	var target string
 	if len(args) > 1 {
 		target = args[1]
@@ -666,7 +675,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		HookBead:   beadID,
 		BeadID:     beadID,
 		TownRoot:   townRoot,
-		BaseBranch: slingBaseBranch,
+		BaseBranch: effectiveBaseBranch,
 	})
 	if err != nil {
 		return err
