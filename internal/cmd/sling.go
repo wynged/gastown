@@ -155,7 +155,7 @@ func init() {
 	slingCmd.Flags().StringVar(&slingMerge, "merge", "", "Merge strategy: direct (push to main), mr (merge queue, default), local (keep on branch)")
 	slingCmd.Flags().BoolVar(&slingNoBoot, "no-boot", false, "Skip rig boot after polecat spawn (avoids witness/refinery lock contention)")
 	slingCmd.Flags().IntVar(&slingMaxConcurrent, "max-concurrent", 0, "Limit concurrent polecat spawns in batch mode (0 = no limit)")
-	slingCmd.Flags().StringVar(&slingBaseBranch, "base-branch", "", "Override base branch for polecat worktree (e.g., 'develop', 'release/v2')")
+	slingCmd.Flags().StringVar(&slingBaseBranch, "base-branch", "", "Base branch for polecat worktree (stored on convoy, auto-propagated to later slings)")
 	slingCmd.Flags().BoolVar(&slingRalph, "ralph", false, "Enable Ralph Wiggum loop mode (fresh context per step, for multi-step workflows)")
 	slingCmd.Flags().StringVar(&slingFormula, "formula", "", "Formula to apply (default: mol-polecat-work for polecat targets)")
 	slingCmd.Flags().StringVar(&slingCrew, "crew", "", "Target a crew member in the specified rig (e.g., --crew mel with target gastown → gastown/crew/mel)")
@@ -642,13 +642,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	// If no explicit --base-branch, check if bead has a convoy with a base_branch
-	if slingBaseBranch == "" {
-		if cb := resolveConvoyBaseBranch(beadID); cb != "" {
-			slingBaseBranch = cb
-		}
-	}
-
 	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
 	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
 	// and scheduler dispatch already use the unified path. Single-sling is deferred
@@ -659,6 +652,15 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Resolve target agent using shared dispatch logic.
 	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
 	// with rig last arg) exits at line 234. The only remaining case is len(args) <= 2.
+	// Resolve base_branch from convoy if not explicitly set (gt-wg6).
+	effectiveBaseBranch := slingBaseBranch
+	if effectiveBaseBranch == "" {
+		if convoyBranch := resolveConvoyBaseBranch(beadID); convoyBranch != "" {
+			effectiveBaseBranch = convoyBranch
+			fmt.Printf("%s Using base_branch %q from convoy\n", style.Dim.Render("○"), convoyBranch)
+		}
+	}
+
 	var target string
 	if len(args) > 1 {
 		target = args[1]
@@ -673,7 +675,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		HookBead:   beadID,
 		BeadID:     beadID,
 		TownRoot:   townRoot,
-		BaseBranch: slingBaseBranch,
+		BaseBranch: effectiveBaseBranch,
 	})
 	if err != nil {
 		return err

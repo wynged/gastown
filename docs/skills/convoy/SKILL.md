@@ -140,6 +140,21 @@ gt convoy -i                     # opens interactive convoy browser
 gt convoy --interactive          # long form
 ```
 
+## Base branch auto-propagation
+
+Convoys store a `base_branch` field in their description (via `ConvoyFields`).
+When `gt sling` dispatches a bead tracked by a convoy, it calls
+`resolveConvoyBaseBranch()` to auto-inherit the branch if no explicit
+`--base-branch` flag was provided. This works in all dispatch paths:
+`executeSling`, `runSling`, and `scheduleBead`.
+
+The base_branch is stored when the convoy is created — either via
+`createAutoConvoy` or `createBatchConvoy` — if the first sling included
+`--base-branch`.
+
+Key source: `sling_convoy.go` (`resolveConvoyBaseBranchFn`, `ConvoyInfo.BaseBranch`),
+`beads/fields.go` (`ConvoyFields.BaseBranch`).
+
 ## Batch sling behavior
 
 `gt sling <bead1> <bead2> <bead3>` creates **one convoy** tracking all beads. The rig is auto-resolved from the beads' prefixes (via `routes.jsonl`). The convoy title is `"Batch: N beads to <rig>"`. Each bead gets its own polecat, but they share a single convoy for tracking.

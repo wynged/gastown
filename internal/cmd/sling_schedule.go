@@ -147,8 +147,13 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	if opts.Merge != "" {
 		fields.Merge = opts.Merge
 	}
-	if opts.BaseBranch != "" {
-		fields.BaseBranch = opts.BaseBranch
+	// Resolve base_branch from convoy if not explicitly set (gt-wg6)
+	effectiveBaseBranch := opts.BaseBranch
+	if effectiveBaseBranch == "" {
+		effectiveBaseBranch = resolveConvoyBaseBranch(beadID)
+	}
+	if effectiveBaseBranch != "" {
+		fields.BaseBranch = effectiveBaseBranch
 	}
 	fields.NoMerge = opts.NoMerge
 	if opts.Account != "" {

@@ -563,6 +563,7 @@ func stripEnvPrefixes(environ []string, prefixes ...string) []string {
 
 // List returns issues matching the given options.
 func (b *Beads) List(opts ListOptions) ([]*Issue, error) {
+	// --json now outputs valid JSON directly (--flat was removed in bd 0.58.0)
 	args := []string{"list", "--json"}
 
 	if opts.Status != "" {

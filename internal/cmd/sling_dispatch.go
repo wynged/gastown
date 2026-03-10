@@ -219,6 +219,16 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		}
 	}
 
+	// 2b. Resolve base_branch from convoy if not explicitly set (gt-wg6).
+	// When a bead belongs to a convoy with a base_branch configured, auto-propagate
+	// the branch so polecats spawn on the correct feature branch.
+	if params.BaseBranch == "" {
+		if convoyBranch := resolveConvoyBaseBranch(params.BeadID); convoyBranch != "" {
+			params.BaseBranch = convoyBranch
+			fmt.Printf("  %s Using base_branch %q from convoy\n", style.Dim.Render("○"), convoyBranch)
+		}
+	}
+
 	// 3. Spawn polecat (via spawnPolecatForSling)
 	spawnOpts := SlingSpawnOptions{
 		Force:      params.Force,
@@ -249,7 +259,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		existingConvoy := isTrackedByConvoy(params.BeadID)
 		if existingConvoy == "" {
 			var err error
-			convoyID, err = createAutoConvoy(params.BeadID, info.Title, params.Owned, params.Merge)
+			convoyID, err = createAutoConvoy(params.BeadID, info.Title, params.Owned, params.Merge, params.BaseBranch)
 			if err != nil {
 				fmt.Printf("  %s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 			} else {

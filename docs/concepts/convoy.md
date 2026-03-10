@@ -193,6 +193,30 @@ This auto-creates a convoy so all work appears in the dashboard:
 
 Even "swarm of one" gets convoy visibility.
 
+## Base Branch Auto-Propagation
+
+When a convoy has a `base_branch` configured, `gt sling` automatically uses it
+for polecats dispatched to beads tracked by that convoy — no need to pass
+`--base-branch` on every sling.
+
+```bash
+# First sling: --base-branch is stored on the convoy
+gt sling gt-task1 gastown --base-branch feat/my-feature
+# → Created convoy hq-cv-abc with base_branch: feat/my-feature
+
+# Subsequent slings: auto-resolved from convoy
+gt sling gt-task2 gastown
+# → Using base_branch "feat/my-feature" from convoy
+```
+
+This works across all dispatch paths:
+- **Direct sling** (`gt sling <bead> <rig>`)
+- **Batch sling** (`gt sling <bead1> <bead2> ... <rig>`)
+- **Convoy dispatch** (`gt sling <convoy-id>`)
+- **Scheduler dispatch** (daemon capacity-based dispatch)
+
+An explicit `--base-branch` flag always overrides the convoy's stored value.
+
 ## Cross-Rig Tracking
 
 Convoys live in town-level beads (`hq-cv-*` prefix) and can track issues from any rig:

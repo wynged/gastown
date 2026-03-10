@@ -143,6 +143,7 @@ type ConvoyInfo struct {
 	ID            string // Convoy bead ID (e.g., "hq-cv-abc")
 	Owned         bool   // true if convoy has gt:owned label
 	MergeStrategy string // "direct", "mr", "local", or "" (default = mr)
+	BaseBranch    string // Base branch for polecat worktrees (e.g., "feat/my-feature")
 }
 
 // IsOwnedDirect returns true if the convoy is owned with direct merge strategy.
@@ -205,8 +206,12 @@ func getConvoyInfoForIssue(issueID string) *ConvoyInfo {
 		}
 	}
 
-	// Parse merge strategy from description using typed accessor
-	info.MergeStrategy = convoyMergeFromFields(convoys[0].Description)
+	// Parse fields from description using typed accessor
+	convoyFields := beads.ParseConvoyFields(&beads.Issue{Description: convoys[0].Description})
+	if convoyFields != nil {
+		info.MergeStrategy = convoyFields.Merge
+		info.BaseBranch = convoyFields.BaseBranch
+	}
 
 	return info
 }
@@ -236,6 +241,31 @@ func getConvoyInfoFromIssue(issueID, cwd string) *ConvoyInfo {
 		MergeStrategy: attachment.MergeStrategy,
 		Owned:         attachment.ConvoyOwned,
 	}
+}
+
+// resolveConvoyBaseBranchFn is the function variable for resolveConvoyBaseBranch,
+// allowing tests to inject a mock without shelling out to bd.
+var resolveConvoyBaseBranchFn = resolveConvoyBaseBranchImpl
+
+// resolveConvoyBaseBranch looks up the base_branch for a bead by checking its
+// convoy membership. Returns the convoy's base_branch if found, empty string otherwise.
+// This allows gt sling to auto-propagate the feature branch from a convoy without
+// requiring --base-branch on every dispatch.
+func resolveConvoyBaseBranch(beadID string) string {
+	return resolveConvoyBaseBranchFn(beadID)
+}
+
+func resolveConvoyBaseBranchImpl(beadID string) string {
+	convoyID := isTrackedByConvoy(beadID)
+	if convoyID == "" {
+		return ""
+	}
+
+	info := getConvoyInfoForIssue(beadID)
+	if info == nil {
+		return ""
+	}
+	return info.BaseBranch
 }
 
 // printConvoyConflict prints detailed information about a bead that is already
@@ -320,7 +350,7 @@ func printConvoyConflict(beadID, convoyID string) {
 // dep add failed should not reference a convoy that has no knowledge of it.
 // If owned is true, the convoy is marked with gt:owned label.
 // beadIDs must be non-empty. The convoy title uses the rig name and bead count.
-func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrategy string) (string, []string, error) {
+func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrategy string, baseBranch ...string) (string, []string, error) {
 	if len(beadIDs) == 0 {
 		return "", nil, fmt.Errorf("no beads to track")
 	}
@@ -336,9 +366,13 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 
 	convoyTitle := fmt.Sprintf("Batch: %d beads to %s", len(beadIDs), rigName)
 	prose := fmt.Sprintf("Auto-created convoy tracking %d beads", len(beadIDs))
-	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, &beads.ConvoyFields{
+	convoyFields := &beads.ConvoyFields{
 		Merge: mergeStrategy,
-	})
+	}
+	if len(baseBranch) > 0 && baseBranch[0] != "" {
+		convoyFields.BaseBranch = baseBranch[0]
+	}
+	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, convoyFields)
 
 	createArgs := []string{
 		"create",
@@ -380,7 +414,7 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 // If owned is true, the convoy is marked with the gt:owned label for caller-managed lifecycle.
 // mergeStrategy is optional: "direct", "mr", or "local" (empty = default mr).
 // Returns the created convoy ID.
-func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy string) (_ string, retErr error) {
+func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy string, baseBranch ...string) (_ string, retErr error) {
 	defer func() { telemetry.RecordConvoyCreate(context.Background(), beadID, retErr) }()
 	// Guard against flag-like titles propagating into convoy names (gt-e0kx5)
 	if beads.IsFlagLikeTitle(beadTitle) {
@@ -401,9 +435,13 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy string
 	// Create convoy with title "Work: <issue-title>"
 	convoyTitle := fmt.Sprintf("Work: %s", beadTitle)
 	prose := fmt.Sprintf("Auto-created convoy tracking %s", beadID)
-	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, &beads.ConvoyFields{
+	convoyFields := &beads.ConvoyFields{
 		Merge: mergeStrategy,
-	})
+	}
+	if len(baseBranch) > 0 && baseBranch[0] != "" {
+		convoyFields.BaseBranch = baseBranch[0]
+	}
+	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, convoyFields)
 
 	createArgs := []string{
 		"create",
