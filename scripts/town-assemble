@@ -109,42 +109,63 @@ peek_lines() {
 }
 
 # Capture pane content for a session (reusable to avoid repeated tmux calls).
-# Captures the last N lines (default 15) from the active pane.
+# Captures the last N lines (default 30) from the active pane.
 capture_pane() {
     local session="$1"
-    local lines="${2:-15}"
+    local lines="${2:-30}"
     $TX capture-pane -t "$session" -p -S "-${lines}" 2>/dev/null
 }
 
-# Is the agent sitting at an empty prompt waiting for input?
-# Checks the actual pane content — an empty ❯ prompt means idle.
-# This is the strongest signal: if the agent is at an empty prompt, it's idle
-# regardless of what else is in the scrollback (old ✻, feature branch, etc).
-is_idle_at_prompt() {
-    local pane_content="$1"
-    # Strip status bar lines (bypass permissions, ─── dividers, status info with ctx:)
-    # Then check if the last remaining line is just the ❯ prompt
-    local last_content
-    last_content=$(echo "$pane_content" \
-        | grep -v '^\s*$' \
-        | grep -v 'bypass permissions' \
-        | grep -v '^[[:space:]]*─' \
-        | grep -v 'ctx:' \
-        | tail -1)
-    # Match prompt character (❯) with optional surrounding whitespace
-    [[ "$last_content" =~ ❯ && ! "$last_content" =~ [a-zA-Z0-9] ]]
-}
+# Classify session state from pane content.
+# Returns one of: "working", "active", "idle"
+#
+# working = Claude is actively generating (✻) or thinking (✽)
+# active  = recent conversation visible, agent hasn't declared itself idle
+# idle    = agent's last response indicates it's waiting for instructions
+classify_session() {
+    local pane="$1"
 
-# Is Claude actively generating? (✻ symbol visible AFTER the last prompt)
-# Old "✻ Cooked for..." or "✻ Brewed for..." lines are completion messages,
-# not active generation. Only count ✻ if it appears after the last ❯ prompt.
-is_working() {
-    local pane_content="$1"
-    # Get everything after the last ❯ prompt line
-    local after_prompt
-    after_prompt=$(echo "$pane_content" | tac | sed '/❯/q' | tac | tail -n +2)
-    # If there's a ✻ after the last prompt, agent is actively generating
-    echo "$after_prompt" | grep -q '✻'
+    # Check for active generation (✻) or extended thinking (✽)
+    # Only count indicators that appear BELOW the input prompt area,
+    # meaning they're from the current turn (not old scrollback).
+    # The prompt ❯ is always visible near the bottom — check above it too
+    # since the working indicator can be right above the prompt divider.
+    if echo "$pane" | grep -q '[✻✽]'; then
+        # Make sure it's not just an old "Cooked for" / "Brewed for" message
+        # by checking if it appears after the last ❯ prompt
+        local after_prompt
+        after_prompt=$(echo "$pane" | tac | sed '/❯/q' | tac)
+        if echo "$after_prompt" | grep -q '[✻✽]'; then
+            echo "working"
+            return
+        fi
+    fi
+
+    # Look at the agent's last text response (● prefixed lines that aren't tool calls).
+    # Tool call lines look like: ● Bash(...), ● Read(...), ● Edit(...), etc.
+    # Text lines look like: ● Some prose text here
+    local last_text
+    last_text=$(echo "$pane" \
+        | grep '^●' \
+        | grep -v '^● [A-Z][a-z]*(' \
+        | tail -1)
+
+    # If the last text response contains idle/waiting phrases → idle
+    if [ -n "$last_text" ]; then
+        if echo "$last_text" | grep -qi \
+            'ready for\|waiting for\|standing by\|checking in\|await.*instruction\|ready for whatever\|no .* mail\|hook is empty'; then
+            echo "idle"
+            return
+        fi
+    fi
+
+    # Has visible conversation (tool calls, responses) → active
+    if echo "$pane" | grep -q '^●'; then
+        echo "active"
+        return
+    fi
+
+    echo "idle"
 }
 
 # Extract branch from Claude Code status bar.
@@ -169,29 +190,31 @@ idle_seconds() {
 }
 
 # Smart filter: is this session "interesting"?
-# Accepts session name; captures pane once and passes content to helpers.
+# Accepts session name; captures pane once and classifies from content.
+#
+# Sets global LAST_STATE for use in reporting ([WORKING] label).
+LAST_STATE=""
+
 is_interesting() {
     local session="$1"
     local pane
-    pane=$(capture_pane "$session" 15)
+    pane=$(capture_pane "$session" 30)
 
-    # Sitting at empty prompt → not interesting (strongest idle signal)
-    is_idle_at_prompt "$pane" && return 1
+    LAST_STATE=$(classify_session "$pane")
 
-    # Currently generating output → always interesting
-    is_working "$pane" && return 0
+    # Working or active conversation → always interesting
+    [[ "$LAST_STATE" == "working" || "$LAST_STATE" == "active" ]] && return 0
 
-    # On a feature/fix branch → interesting (has active work context)
+    # Content says idle — but check if on a feature branch with very recent activity
+    # (agent might have just finished a task and is momentarily waiting)
     local branch
     branch=$(get_branch "$session")
     if [[ -n "$branch" && "$branch" != "main" && "$branch" != "master" ]]; then
-        return 0
+        local idle
+        idle=$(idle_seconds "$session")
+        # On a feature branch and active in the last 2 minutes → still interesting
+        [[ "$idle" -lt 120 ]] && return 0
     fi
-
-    # Recent activity → interesting
-    local idle
-    idle=$(idle_seconds "$session")
-    [[ "$idle" -lt "$IDLE_THRESHOLD" ]] && return 0
 
     return 1
 }
@@ -239,8 +262,9 @@ for sess in "${interesting[@]}"; do
     branch=$(get_branch "$sess")
     idle=$(idle_seconds "$sess")
     working=""
-    pane=$(capture_pane "$sess" 15)
-    is_working "$pane" && working=" [WORKING]"
+    pane=$(capture_pane "$sess" 30)
+    state=$(classify_session "$pane")
+    [[ "$state" == "working" ]] && working=" [WORKING]"
     printf "  ● %-25s %-35s idle:%-5s%s\n" "$label" "${branch:-main}" "$(fmt_idle $idle)" "$working"
 done
 
