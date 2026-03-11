@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# town-assemble [--all] [--force]
+#
+# Assemble "interesting" agent sessions across all rigs into a single
+# tmux session for easy cycling (Ctrl+B n/p).
+#
+# "Interesting" means ANY of:
+#   - Currently working (✻ visible — Claude is generating)
+#   - On a feature/fix branch (not main/master)
+#   - Had activity within the last 10 minutes
+#
+# Uses gt peek for pane capture (proper session name resolution).
+#
+# Session name: town-crew
+# Idempotent — re-running updates the window list.
+
+set -e
+
+TOWN_ROOT="/home/sirwassail/source/hypar_gt"
+TOWN_NAME=$(basename "$TOWN_ROOT")
+TMUX_SOCKET=$(echo "$TOWN_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//')
+[[ -z "$TMUX_SOCKET" ]] && TMUX_SOCKET="default"
+TX="tmux -L $TMUX_SOCKET"
+
+SESSION="town-crew"
+include_all=false
+force=false
+IDLE_THRESHOLD=600  # 10 minutes
+
+for arg in "$@"; do
+    [[ "$arg" == "--all" ]]   && include_all=true
+    [[ "$arg" == "--force" ]] && force=true
+    [[ "$arg" == "--help" || "$arg" == "-h" ]] && {
+        echo "Usage: town-assemble [--all] [--force]"
+        echo ""
+        echo "  --all    Include all agent sessions, not just interesting ones"
+        echo "  --force  Rebuild session from scratch"
+        exit 0
+    }
+done
+
+# --- Helpers ---
+
+is_agent_session() {
+    local name="$1"
+    [[ "$name" == "$SESSION" ]] && return 1
+    [[ "$name" =~ ^hq- ]] && return 1
+    [[ "$name" =~ -witness$ ]] && return 1
+    [[ "$name" =~ -refinery$ ]] && return 1
+    [[ "$name" =~ -dev$ ]] && return 1
+    [[ "$name" =~ -crew$ ]] && return 1  # per-rig assembled sessions
+    return 0
+}
+
+has_claude() {
+    local session="$1"
+    local cmd
+    cmd=$($TX list-panes -t "$session" -F '#{pane_current_command}' 2>/dev/null | head -1)
+    [[ "$cmd" == "claude" || "$cmd" == "node" ]]
+}
+
+# Map tmux session name → gt peek address (rig/crew/name or rig/name)
+peek_addr() {
+    local name="$1"
+    if [[ "$name" =~ ^(.+)-crew-(.+)$ ]]; then
+        local prefix="${BASH_REMATCH[1]}"
+        local member="${BASH_REMATCH[2]}"
+        local rig
+        rig=$(rig_from_prefix "$prefix")
+        echo "${rig}/crew/${member}"
+    else
+        # polecat: {prefix}-{name} → need rig/name
+        echo "$name"
+    fi
+}
+
+# Map tmux session name → display label (rig/member)
+session_label() {
+    local name="$1"
+    if [[ "$name" =~ ^(.+)-crew-(.+)$ ]]; then
+        local prefix="${BASH_REMATCH[1]}"
+        local member="${BASH_REMATCH[2]}"
+        local rig
+        rig=$(rig_from_prefix "$prefix")
+        echo "${rig}/${member}"
+    else
+        echo "$name"
+    fi
+}
+
+rig_from_prefix() {
+    local prefix="$1"
+    jq -r --arg p "$prefix" '.rigs | to_entries[] | select(.value.beads.prefix == $p) | .key' \
+        "$TOWN_ROOT/mayor/rigs.json" 2>/dev/null | head -1
+}
+
+# Capture last N lines from a session via gt peek
+# Falls back to raw tmux capture if gt peek fails
+peek_lines() {
+    local session="$1"
+    local lines="${2:-10}"
+    local addr
+    addr=$(peek_addr "$session")
+    if [[ -n "$addr" ]]; then
+        gt peek "$addr" -n "$lines" 2>/dev/null
+    else
+        $TX capture-pane -t "$session" -p -S "-${lines}" 2>/dev/null
+    fi
+}
+
+# Capture pane content for a session (reusable to avoid repeated tmux calls).
+# Captures the last N lines (default 15) from the active pane.
+capture_pane() {
+    local session="$1"
+    local lines="${2:-15}"
+    $TX capture-pane -t "$session" -p -S "-${lines}" 2>/dev/null
+}
+
+# Is the agent sitting at an empty prompt waiting for input?
+# Checks the actual pane content — an empty ❯ prompt means idle.
+# This is the strongest signal: if the agent is at an empty prompt, it's idle
+# regardless of what else is in the scrollback (old ✻, feature branch, etc).
+is_idle_at_prompt() {
+    local pane_content="$1"
+    # Strip status bar lines (bypass permissions, ─── dividers, status info with ctx:)
+    # Then check if the last remaining line is just the ❯ prompt
+    local last_content
+    last_content=$(echo "$pane_content" \
+        | grep -v '^\s*$' \
+        | grep -v 'bypass permissions' \
+        | grep -v '^[[:space:]]*─' \
+        | grep -v 'ctx:' \
+        | tail -1)
+    # Match prompt character (❯) with optional surrounding whitespace
+    [[ "$last_content" =~ ❯ && ! "$last_content" =~ [a-zA-Z0-9] ]]
+}
+
+# Is Claude actively generating? (✻ symbol visible AFTER the last prompt)
+# Old "✻ Cooked for..." or "✻ Brewed for..." lines are completion messages,
+# not active generation. Only count ✻ if it appears after the last ❯ prompt.
+is_working() {
+    local pane_content="$1"
+    # Get everything after the last ❯ prompt line
+    local after_prompt
+    after_prompt=$(echo "$pane_content" | tac | sed '/❯/q' | tac | tail -n +2)
+    # If there's a ✻ after the last prompt, agent is actively generating
+    echo "$after_prompt" | grep -q '✻'
+}
+
+# Extract branch from Claude Code status bar.
+# The status bar is the line just before "bypass permissions" at the bottom.
+# Format: "  <name> | <branch> | [localhost:port |] <model> | ctx: N% | ..."
+get_branch() {
+    local session="$1"
+    local line
+    line=$($TX capture-pane -t "$session" -p -S -5 2>/dev/null \
+        | grep -B1 'bypass permissions' | head -1)
+    [[ -z "$line" || ! "$line" =~ \| ]] && return
+    echo "$line" | awk -F' \\| ' '{print $2}' | sed 's/^ *//;s/ *$//'
+}
+
+# Seconds since last pane activity
+idle_seconds() {
+    local session="$1"
+    local activity now
+    activity=$($TX display-message -t "$session" -p '#{session_activity}' 2>/dev/null)
+    now=$(date +%s)
+    echo $(( now - activity ))
+}
+
+# Smart filter: is this session "interesting"?
+# Accepts session name; captures pane once and passes content to helpers.
+is_interesting() {
+    local session="$1"
+    local pane
+    pane=$(capture_pane "$session" 15)
+
+    # Sitting at empty prompt → not interesting (strongest idle signal)
+    is_idle_at_prompt "$pane" && return 1
+
+    # Currently generating output → always interesting
+    is_working "$pane" && return 0
+
+    # On a feature/fix branch → interesting (has active work context)
+    local branch
+    branch=$(get_branch "$session")
+    if [[ -n "$branch" && "$branch" != "main" && "$branch" != "master" ]]; then
+        return 0
+    fi
+
+    # Recent activity → interesting
+    local idle
+    idle=$(idle_seconds "$session")
+    [[ "$idle" -lt "$IDLE_THRESHOLD" ]] && return 0
+
+    return 1
+}
+
+# --- Discover and classify sessions ---
+
+interesting=()
+boring=()
+dead=()
+
+while IFS= read -r sess_name; do
+    is_agent_session "$sess_name" || continue
+
+    if ! has_claude "$sess_name"; then
+        dead+=("$sess_name")
+        continue
+    fi
+
+    if [[ "$include_all" == true ]] || is_interesting "$sess_name"; then
+        interesting+=("$sess_name")
+    else
+        boring+=("$sess_name")
+    fi
+done < <($TX list-sessions -F '#{session_name}' 2>/dev/null)
+
+targets=("${interesting[@]}")
+
+# --- Report ---
+
+fmt_idle() {
+    local idle="$1"
+    if [[ "$idle" -lt 60 ]]; then echo "<1m"
+    elif [[ "$idle" -lt 3600 ]]; then echo "$((idle/60))m"
+    else echo "$((idle/3600))h$((idle%3600/60))m"
+    fi
+}
+
+echo "Interesting : ${#interesting[@]}"
+[[ ${#boring[@]} -gt 0 ]] && echo "Idle/boring : ${#boring[@]} (use --all to include)"
+[[ ${#dead[@]} -gt 0 ]]   && echo "Dead        : ${#dead[@]} (no claude process)"
+echo ""
+
+for sess in "${interesting[@]}"; do
+    label=$(session_label "$sess")
+    branch=$(get_branch "$sess")
+    idle=$(idle_seconds "$sess")
+    working=""
+    pane=$(capture_pane "$sess" 15)
+    is_working "$pane" && working=" [WORKING]"
+    printf "  ● %-25s %-35s idle:%-5s%s\n" "$label" "${branch:-main}" "$(fmt_idle $idle)" "$working"
+done
+
+for sess in "${boring[@]}"; do
+    label=$(session_label "$sess")
+    branch=$(get_branch "$sess")
+    idle=$(idle_seconds "$sess")
+    printf "  ○ %-25s %-35s idle:%-5s\n" "$label" "${branch:-main}" "$(fmt_idle $idle)"
+done
+echo ""
+
+if [[ ${#targets[@]} -eq 0 ]]; then
+    echo "No interesting sessions to assemble."
+    $TX kill-session -t "$SESSION" 2>/dev/null || true
+    exit 0
+fi
+
+# --- Build/update the assembled session ---
+
+if $TX has-session -t "$SESSION" 2>/dev/null; then
+    if [[ "$force" == true ]]; then
+        $TX kill-session -t "$SESSION" 2>/dev/null || true
+    else
+        # Incremental update: add missing, remove stale
+        current_windows=()
+        while IFS=$'\t' read -r wname windex; do
+            current_windows+=("$wname")
+        done < <($TX list-windows -t "$SESSION" -F '#{window_name}\t#{window_index}' 2>/dev/null)
+
+        added=()
+        for sess in "${targets[@]}"; do
+            label=$(session_label "$sess")
+            found=false
+            for w in "${current_windows[@]}"; do
+                [[ "$w" == "$label" ]] && { found=true; break; }
+            done
+            if [[ "$found" == false ]]; then
+                if $TX has-session -t "$sess" 2>/dev/null; then
+                    $TX link-window -s "${sess}:0" -t "${SESSION}:" 2>/dev/null || continue
+                    win=$($TX list-windows -t "$SESSION" -F '#{window_index}' | tail -1)
+                    $TX rename-window -t "${SESSION}:${win}" "$label"
+                    added+=("$label")
+                fi
+            fi
+        done
+
+        # Remove windows no longer interesting
+        target_labels=()
+        for sess in "${targets[@]}"; do
+            target_labels+=("$(session_label "$sess")")
+        done
+
+        while IFS=$'\t' read -r wname windex; do
+            [[ "$wname" == "placeholder" ]] && continue
+            in_targets=false
+            for tl in "${target_labels[@]}"; do
+                [[ "$tl" == "$wname" ]] && { in_targets=true; break; }
+            done
+            if [[ "$in_targets" == false ]]; then
+                $TX unlink-window -t "${SESSION}:${windex}" 2>/dev/null || true
+            fi
+        done < <($TX list-windows -t "$SESSION" -F '#{window_name}\t#{window_index}' 2>/dev/null)
+
+        [[ ${#added[@]} -gt 0 ]] && echo "Added: ${added[*]}"
+        echo "Session updated → $SESSION"
+
+        if [[ -n "$TMUX" ]]; then
+            $TX switch-client -t "$SESSION"
+        else
+            $TX attach -t "$SESSION"
+        fi
+        exit 0
+    fi
+fi
+
+# Fresh build
+$TX new-session -d -s "$SESSION"
+
+for sess in "${targets[@]}"; do
+    label=$(session_label "$sess")
+    if $TX has-session -t "$sess" 2>/dev/null; then
+        $TX link-window -s "${sess}:0" -t "${SESSION}:" 2>/dev/null || continue
+        win=$($TX list-windows -t "$SESSION" -F '#{window_index}' | tail -1)
+        $TX rename-window -t "${SESSION}:${win}" "$label"
+    fi
+done
+
+$TX kill-window -t "${SESSION}:0" 2>/dev/null || true
+
+echo "Assembled ${#targets[@]} sessions → $SESSION"
+
+if [[ -n "$TMUX" ]]; then
+    $TX switch-client -t "$SESSION"
+else
+    $TX attach -t "$SESSION"
+fi
