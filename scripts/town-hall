@@ -468,9 +468,9 @@ setup_view_keys() {
     $TX bind-key -T root Left  if-shell -F "$guard" 'select-pane -L' 'send-keys Left'
     $TX bind-key -T root Right if-shell -F "$guard" 'select-pane -R' 'send-keys Right'
 
-    # Enter: jump to the member's real session in town-hall
+    # Enter: jump to the member's window inside the town-hall session
     $TX bind-key -T root Enter if-shell -F "$guard" \
-        "run-shell '$TX switch-client -t #{pane_title}'" \
+        "run-shell '$TX select-window -t \"$SESSION:=#{pane_title}\" \\; switch-client -t \"$SESSION\"'" \
         'send-keys Enter'
 
     # prefix-h: jump to the view from anywhere
@@ -533,8 +533,8 @@ cmd_view() {
             $TX split-window -t "$VIEW_SESSION" "bash" "-c" "$loop"
         fi
 
-        # Tag pane with target session so Enter can jump there
-        $TX select-pane -t "$VIEW_SESSION" -T "$sess_name"
+        # Tag pane with roster entry so Enter can find the town-hall window
+        $TX select-pane -t "$VIEW_SESSION" -T "$entry"
         ((count++)) || true
     done
 
