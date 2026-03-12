@@ -423,7 +423,7 @@ cmd_assemble() {
         local win
         win=$($TX list-windows -t "$SESSION" -F '#{window_index}' | tail -1)
         $TX rename-window -t "${SESSION}:${win}" "$entry"
-        ((linked++))
+        ((linked++)) || true
     done
 
     # Kill the default empty window
@@ -516,7 +516,7 @@ cmd_view() {
 
         # Tag pane with target session so Enter can jump there
         $TX select-pane -t "$VIEW_SESSION" -T "$sess_name"
-        ((count++))
+        ((count++)) || true
     done
 
     if [[ "$first" == true ]]; then
