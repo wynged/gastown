@@ -461,6 +461,10 @@ setup_view_keys() {
 
     # Global: prefix-h jumps to the view and enters bare-key mode
     $TX bind-key h switch-client -t "$VIEW_SESSION" \; switch-client -T "$kt"
+
+    # Auto-activate bare-key mode whenever client switches to the view session
+    $TX set-hook -g client-session-changed \
+        "if-shell -F '#{==:#{session_name},${VIEW_SESSION}}' 'switch-client -T ${kt}' ''"
 }
 
 cmd_view() {
@@ -494,6 +498,11 @@ cmd_view() {
         fi
     fi
 
+    # Ensure the town-hall linked-window session exists (Enter/q switch to it)
+    if ! $TX has-session -t "$SESSION" 2>/dev/null; then
+        cmd_assemble "$@"
+    fi
+
     # Build tiled view — one pane per roster member with a capture loop
     local first=true
     local count=0
@@ -524,8 +533,13 @@ cmd_view() {
         return
     fi
 
-    # Tile evenly and set up keybindings
+    # Tile evenly, show pane borders with titles, and set up keybindings
     $TX select-layout -t "$VIEW_SESSION" tiled
+    $TX set-option -t "$VIEW_SESSION" pane-border-status top
+    $TX set-option -t "$VIEW_SESSION" pane-border-format \
+        " #{pane_title} "
+    $TX set-option -t "$VIEW_SESSION" pane-active-border-style "fg=cyan,bold"
+    $TX set-option -t "$VIEW_SESSION" pane-border-style "fg=colour240"
     setup_view_keys
 
     [[ "$refresh" != true ]] && echo "View: $count panes → $VIEW_SESSION (prefix-h to switch)"
