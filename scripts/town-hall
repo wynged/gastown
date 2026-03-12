@@ -524,7 +524,7 @@ cmd_view() {
 
         # Each pane: clear screen, capture target pane (fit to pane height), sleep, repeat
         local loop
-        loop="while true; do lines=\$(tput lines 2>/dev/null || echo 20); printf '\\033[2J\\033[H'; $TX capture-pane -t '$sess_name' -p -S -\$lines 2>/dev/null || echo '(no session)'; sleep 2; done"
+        loop="while true; do lines=\$(tput lines 2>/dev/null || echo 20); printf '\\033[2J\\033[H'; $TX capture-pane -t '$sess_name' -e -p -S -\$lines 2>/dev/null || echo '(no session)'; sleep 2; done"
 
         if [[ "$first" == true ]]; then
             $TX new-session -d -s "$VIEW_SESSION" -x 200 -y 50 "bash" "-c" "$loop"
