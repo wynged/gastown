@@ -439,32 +439,29 @@ refresh_view() {
 }
 
 # Set up bare-key navigation on the view session
+# Uses root-table bindings with session guards so keys always work
+# (custom key-tables auto-expire after one keypress in tmux)
 setup_view_keys() {
-    local kt="thv-keys"
+    local vs="$VIEW_SESSION"
+    local guard='#{==:#{session_name},town-hall-view}'
 
-    # Arrow keys navigate panes, stay in bare-key mode
-    $TX bind-key -T "$kt" Up    select-pane -U \; switch-client -T "$kt"
-    $TX bind-key -T "$kt" Down  select-pane -D \; switch-client -T "$kt"
-    $TX bind-key -T "$kt" Left  select-pane -L \; switch-client -T "$kt"
-    $TX bind-key -T "$kt" Right select-pane -R \; switch-client -T "$kt"
-    $TX bind-key -T "$kt" k     select-pane -U \; switch-client -T "$kt"
-    $TX bind-key -T "$kt" j     select-pane -D \; switch-client -T "$kt"
-    $TX bind-key -T "$kt" h     select-pane -L \; switch-client -T "$kt"
-    $TX bind-key -T "$kt" l     select-pane -R \; switch-client -T "$kt"
+    # hjkl / arrow keys — navigate panes (pass through to pane on other sessions)
+    $TX bind-key -T root k     if-shell -F "$guard" 'select-pane -U' 'send-keys k'
+    $TX bind-key -T root j     if-shell -F "$guard" 'select-pane -D' 'send-keys j'
+    $TX bind-key -T root h     if-shell -F "$guard" 'select-pane -L' 'send-keys h'
+    $TX bind-key -T root l     if-shell -F "$guard" 'select-pane -R' 'send-keys l'
+    $TX bind-key -T root Up    if-shell -F "$guard" 'select-pane -U' 'send-keys Up'
+    $TX bind-key -T root Down  if-shell -F "$guard" 'select-pane -D' 'send-keys Down'
+    $TX bind-key -T root Left  if-shell -F "$guard" 'select-pane -L' 'send-keys Left'
+    $TX bind-key -T root Right if-shell -F "$guard" 'select-pane -R' 'send-keys Right'
 
     # Enter: jump to the member's real session in town-hall
-    $TX bind-key -T "$kt" Enter run-shell \
-        "$TX switch-client -t '#{pane_title}'"
+    $TX bind-key -T root Enter if-shell -F "$guard" \
+        "run-shell '$TX switch-client -t #{pane_title}'" \
+        'send-keys Enter'
 
-    # q: back to town-hall (exits bare-key mode automatically)
-    $TX bind-key -T "$kt" q switch-client -t "$SESSION"
-
-    # Global: prefix-h jumps to the view and enters bare-key mode
-    $TX bind-key h switch-client -t "$VIEW_SESSION" \; switch-client -T "$kt"
-
-    # Auto-activate bare-key mode whenever client switches to the view session
-    $TX set-hook -g client-session-changed \
-        "if-shell -F '#{==:#{session_name},${VIEW_SESSION}}' 'switch-client -T ${kt}' ''"
+    # prefix-h: jump to the view from anywhere
+    $TX bind-key h switch-client -t "$vs"
 }
 
 cmd_view() {
