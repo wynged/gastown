@@ -289,9 +289,22 @@ cmd_enter() {
     entry=$(resolve_member "$member" "$rig_hint") || exit 1
     add_to_roster "$entry"
 
-    # Link tmux window if session exists
-    local sess_name
+    # Start session if not running
+    local sess_name rig_name member_name
     sess_name=$(tmux_session_name "$entry")
+    rig_name="${entry%%/*}"
+    member_name="${entry#*/}"
+    if [[ -n "$sess_name" ]] && ! $TX has-session -t "$sess_name" 2>/dev/null; then
+        echo "Starting $entry..."
+        gt crew start "$rig_name" "$member_name" 2>/dev/null || true
+        # Brief wait for session to appear
+        for i in 1 2 3; do
+            $TX has-session -t "$sess_name" 2>/dev/null && break
+            sleep 1
+        done
+    fi
+
+    # Link tmux window if session exists
     if [[ -n "$sess_name" ]] && $TX has-session -t "$sess_name" 2>/dev/null; then
         # Ensure the town-hall tmux session exists
         if ! $TX has-session -t "$SESSION" 2>/dev/null; then
@@ -435,7 +448,7 @@ cmd_assemble() {
 # Refresh the view session if it exists (no-op otherwise)
 refresh_view() {
     $TX has-session -t "$VIEW_SESSION" 2>/dev/null || return 0
-    cmd_view --refresh
+    cmd_view --refresh || true
 }
 
 # Set up bare-key navigation on the view session
