@@ -345,13 +345,13 @@ cmd_leave() {
 
     # Unlink tmux window if present
     if $TX has-session -t "$SESSION" 2>/dev/null; then
-        while IFS=$'\t' read -r wname windex; do
+        while IFS='|' read -r wname windex; do
             if [[ "$wname" == "$entry" ]]; then
                 $TX unlink-window -t "${SESSION}:${windex}" 2>/dev/null || true
                 echo "Unlinked $entry from town-hall session"
                 break
             fi
-        done < <($TX list-windows -t "$SESSION" -F '#{window_name}\t#{window_index}' 2>/dev/null)
+        done < <($TX list-windows -t "$SESSION" -F '#{window_name}|#{window_index}' 2>/dev/null)
     fi
 
     refresh_view
@@ -405,7 +405,7 @@ cmd_assemble() {
             done
 
             # Remove windows not in roster
-            while IFS=$'\t' read -r wname windex; do
+            while IFS='|' read -r wname windex; do
                 [[ "$wname" == "placeholder" ]] && continue
                 local in_roster=false
                 for e in "${entries[@]}"; do
@@ -414,7 +414,7 @@ cmd_assemble() {
                 if [[ "$in_roster" == false ]]; then
                     $TX unlink-window -t "${SESSION}:${windex}" 2>/dev/null || true
                 fi
-            done < <($TX list-windows -t "$SESSION" -F '#{window_name}\t#{window_index}' 2>/dev/null)
+            done < <($TX list-windows -t "$SESSION" -F '#{window_name}|#{window_index}' 2>/dev/null)
 
             [[ ${#added[@]} -gt 0 ]] && echo "Added: ${added[*]}"
             echo "Town hall updated"
