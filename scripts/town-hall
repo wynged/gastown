@@ -1,0 +1,578 @@
+#!/usr/bin/env bash
+# town-hall [enter|leave|assemble|view|list] [member] [rig]
+#
+# Manage the town hall — a manually curated set of agent sessions
+# assembled into a single tmux session for easy cycling (Ctrl+B n/p).
+#
+# Subcommands:
+#   (no args)           List roster with live status
+#   enter <member> [rig]  Add member to roster + link tmux window
+#   leave <member>      Remove member from roster + unlink tmux window
+#   assemble [--force]  Build/rebuild tmux session from roster
+#   view [--force]      Tiled read-only overview of all roster sessions
+#
+# Roster file: $TOWN_ROOT/.town-hall (one rig/member per line)
+# Session name: town-hall
+
+set -e
+
+TOWN_ROOT="/home/sirwassail/source/hypar_gt"
+TOWN_NAME=$(basename "$TOWN_ROOT")
+TMUX_SOCKET=$(echo "$TOWN_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//')
+[[ -z "$TMUX_SOCKET" ]] && TMUX_SOCKET="default"
+TX="tmux -L $TMUX_SOCKET"
+
+SESSION="town-hall"
+VIEW_SESSION="town-hall-view"
+ROSTER_FILE="$TOWN_ROOT/.town-hall"
+RIGS_JSON="$TOWN_ROOT/mayor/rigs.json"
+SELF_SCRIPT="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+# --- Helpers ---
+
+# Get beads prefix for a rig name
+prefix_for_rig() {
+    local rig="$1"
+    jq -r --arg r "$rig" '.rigs[$r].beads.prefix // empty' "$RIGS_JSON" 2>/dev/null
+}
+
+# Get rig name from beads prefix
+rig_from_prefix() {
+    local prefix="$1"
+    jq -r --arg p "$prefix" '.rigs | to_entries[] | select(.value.beads.prefix == $p) | .key' \
+        "$RIGS_JSON" 2>/dev/null | head -1
+}
+
+# Map roster entry (rig/member) → tmux session name (prefix-crew-member)
+tmux_session_name() {
+    local entry="$1"
+    local rig="${entry%%/*}"
+    local member="${entry#*/}"
+    local prefix
+    prefix=$(prefix_for_rig "$rig")
+    [[ -z "$prefix" ]] && { echo ""; return; }
+    echo "${prefix}-crew-${member}"
+}
+
+# Map roster entry → display label
+display_label() {
+    local entry="$1"
+    echo "$entry"
+}
+
+# Resolve a member name to rig/member. If already qualified, validate it.
+# If just a name, scan rigs to find a unique match.
+resolve_member() {
+    local input="$1"
+    local rig_hint="$2"
+
+    # Already qualified: rig/member
+    if [[ "$input" == */* ]]; then
+        local rig="${input%%/*}"
+        local member="${input#*/}"
+        if [[ -d "$TOWN_ROOT/$rig/crew/$member" ]]; then
+            echo "$rig/$member"
+            return 0
+        fi
+        echo "Error: crew member '$member' not found in rig '$rig'" >&2
+        return 1
+    fi
+
+    # Rig hint provided as second arg
+    if [[ -n "$rig_hint" ]]; then
+        if [[ -d "$TOWN_ROOT/$rig_hint/crew/$input" ]]; then
+            echo "$rig_hint/$input"
+            return 0
+        fi
+        echo "Error: crew member '$input' not found in rig '$rig_hint'" >&2
+        return 1
+    fi
+
+    # Scan all rigs for the member
+    local matches=()
+    for rig_dir in "$TOWN_ROOT"/*/crew/"$input"; do
+        [[ -d "$rig_dir" ]] || continue
+        local rig
+        rig=$(basename "$(dirname "$(dirname "$rig_dir")")")
+        matches+=("$rig/$input")
+    done
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        echo "Error: crew member '$input' not found in any rig" >&2
+        return 1
+    elif [[ ${#matches[@]} -gt 1 ]]; then
+        echo "Error: '$input' is ambiguous — found in: ${matches[*]}" >&2
+        echo "Specify as rig/member (e.g. ${matches[0]})" >&2
+        return 1
+    fi
+
+    echo "${matches[0]}"
+}
+
+# Read roster file into an array
+read_roster() {
+    local entries=()
+    if [[ -f "$ROSTER_FILE" ]]; then
+        while IFS= read -r line; do
+            line="${line%%#*}"          # strip comments
+            line="${line// /}"          # strip whitespace
+            [[ -z "$line" ]] && continue
+            entries+=("$line")
+        done < "$ROSTER_FILE"
+    fi
+    printf '%s\n' "${entries[@]}"
+}
+
+# Check if entry is already in roster
+in_roster() {
+    local entry="$1"
+    grep -qx "$entry" "$ROSTER_FILE" 2>/dev/null
+}
+
+# Add entry to roster
+add_to_roster() {
+    local entry="$1"
+    if in_roster "$entry"; then
+        echo "$entry is already in the town hall"
+        return 0
+    fi
+    echo "$entry" >> "$ROSTER_FILE"
+    echo "Added $entry to the town hall"
+}
+
+# Remove entry from roster
+remove_from_roster() {
+    local entry="$1"
+    if ! in_roster "$entry"; then
+        echo "$entry is not in the town hall"
+        return 0
+    fi
+    local tmp
+    tmp=$(mktemp)
+    grep -vx "$entry" "$ROSTER_FILE" > "$tmp" || true
+    mv "$tmp" "$ROSTER_FILE"
+    echo "Removed $entry from the town hall"
+}
+
+# Capture pane content for a session
+capture_pane() {
+    local session="$1"
+    local lines="${2:-30}"
+    $TX capture-pane -t "$session" -p -S "-${lines}" 2>/dev/null
+}
+
+# Classify session state from pane content: working, active, idle
+classify_session() {
+    local pane="$1"
+
+    if echo "$pane" | grep -q '[✻✽]'; then
+        local after_prompt
+        after_prompt=$(echo "$pane" | tac | sed '/❯/q' | tac)
+        if echo "$after_prompt" | grep -q '[✻✽]'; then
+            echo "working"
+            return
+        fi
+    fi
+
+    local last_text
+    last_text=$(echo "$pane" \
+        | grep '^●' \
+        | grep -v '^● [A-Z][a-z]*(' \
+        | tail -1)
+
+    if [ -n "$last_text" ]; then
+        if echo "$last_text" | grep -qi \
+            'ready for\|waiting for\|standing by\|checking in\|await.*instruction\|ready for whatever\|no .* mail\|hook is empty'; then
+            echo "idle"
+            return
+        fi
+    fi
+
+    if echo "$pane" | grep -q '^●'; then
+        echo "active"
+        return
+    fi
+
+    echo "idle"
+}
+
+# Extract branch from Claude Code status bar
+get_branch() {
+    local session="$1"
+    local line
+    line=$($TX capture-pane -t "$session" -p -S -5 2>/dev/null \
+        | grep -B1 'bypass permissions' | head -1)
+    [[ -z "$line" || ! "$line" =~ \| ]] && return
+    echo "$line" | awk -F' \\| ' '{print $2}' | sed 's/^ *//;s/ *$//'
+}
+
+# Seconds since last pane activity
+idle_seconds() {
+    local session="$1"
+    local activity now
+    activity=$($TX display-message -t "$session" -p '#{session_activity}' 2>/dev/null)
+    now=$(date +%s)
+    echo $(( now - activity ))
+}
+
+# Format idle time
+fmt_idle() {
+    local idle="$1"
+    if [[ "$idle" -lt 60 ]]; then echo "<1m"
+    elif [[ "$idle" -lt 3600 ]]; then echo "$((idle/60))m"
+    else echo "$((idle/3600))h$((idle%3600/60))m"
+    fi
+}
+
+# Check if a tmux session has a claude process
+has_claude() {
+    local session="$1"
+    local cmd
+    cmd=$($TX list-panes -t "$session" -F '#{pane_current_command}' 2>/dev/null | head -1)
+    [[ "$cmd" == "claude" || "$cmd" == "node" ]]
+}
+
+# --- Subcommands ---
+
+cmd_list() {
+    local entries
+    mapfile -t entries < <(read_roster)
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        echo "Town hall is empty. Use 'town-hall enter <member>' to add someone."
+        return
+    fi
+
+    echo "Town Hall Roster (${#entries[@]} members)"
+    echo ""
+
+    for entry in "${entries[@]}"; do
+        local sess_name label branch idle state marker
+        sess_name=$(tmux_session_name "$entry")
+        label=$(display_label "$entry")
+
+        if [[ -z "$sess_name" ]] || ! $TX has-session -t "$sess_name" 2>/dev/null; then
+            printf "  ○ %-25s (no session)\n" "$label"
+            continue
+        fi
+
+        if ! has_claude "$sess_name"; then
+            printf "  ✗ %-25s (dead — no claude process)\n" "$label"
+            continue
+        fi
+
+        branch=$(get_branch "$sess_name")
+        idle=$(idle_seconds "$sess_name")
+        local pane
+        pane=$(capture_pane "$sess_name" 30)
+        state=$(classify_session "$pane")
+
+        marker=""
+        [[ "$state" == "working" ]] && marker=" [WORKING]"
+        [[ "$state" == "active" ]]  && marker=" [ACTIVE]"
+
+        printf "  ● %-25s %-25s idle:%-5s%s\n" "$label" "${branch:-main}" "$(fmt_idle $idle)" "$marker"
+    done
+    echo ""
+}
+
+cmd_enter() {
+    local member="$1"
+    local rig_hint="$2"
+
+    if [[ -z "$member" ]]; then
+        echo "Usage: town-hall enter <member> [rig]"
+        exit 1
+    fi
+
+    local entry
+    entry=$(resolve_member "$member" "$rig_hint") || exit 1
+    add_to_roster "$entry"
+
+    # Link tmux window if session exists
+    local sess_name
+    sess_name=$(tmux_session_name "$entry")
+    if [[ -n "$sess_name" ]] && $TX has-session -t "$sess_name" 2>/dev/null; then
+        # Ensure the town-hall tmux session exists
+        if ! $TX has-session -t "$SESSION" 2>/dev/null; then
+            $TX new-session -d -s "$SESSION"
+        fi
+
+        # Check if already linked
+        local already_linked=false
+        while IFS= read -r wname; do
+            [[ "$wname" == "$entry" ]] && { already_linked=true; break; }
+        done < <($TX list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null)
+
+        if [[ "$already_linked" == false ]]; then
+            $TX link-window -s "${sess_name}:0" -t "${SESSION}:" 2>/dev/null || true
+            local win
+            win=$($TX list-windows -t "$SESSION" -F '#{window_index}' | tail -1)
+            $TX rename-window -t "${SESSION}:${win}" "$entry"
+            echo "Linked $entry to town-hall session"
+        fi
+    else
+        echo "(session not running — will link when started)"
+    fi
+
+    refresh_view
+}
+
+cmd_leave() {
+    local member="$1"
+
+    if [[ -z "$member" ]]; then
+        echo "Usage: town-hall leave <member>"
+        exit 1
+    fi
+
+    local entry
+    entry=$(resolve_member "$member" "") || exit 1
+    remove_from_roster "$entry"
+
+    # Unlink tmux window if present
+    if $TX has-session -t "$SESSION" 2>/dev/null; then
+        while IFS=$'\t' read -r wname windex; do
+            if [[ "$wname" == "$entry" ]]; then
+                $TX unlink-window -t "${SESSION}:${windex}" 2>/dev/null || true
+                echo "Unlinked $entry from town-hall session"
+                break
+            fi
+        done < <($TX list-windows -t "$SESSION" -F '#{window_name}\t#{window_index}' 2>/dev/null)
+    fi
+
+    refresh_view
+}
+
+cmd_assemble() {
+    local force=false
+    for arg in "$@"; do
+        [[ "$arg" == "--force" ]] && force=true
+    done
+
+    local entries
+    mapfile -t entries < <(read_roster)
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        echo "Town hall is empty. Use 'town-hall enter <member>' to add someone."
+        $TX kill-session -t "$SESSION" 2>/dev/null || true
+        return
+    fi
+
+    # Kill existing session if --force
+    if $TX has-session -t "$SESSION" 2>/dev/null; then
+        if [[ "$force" == true ]]; then
+            $TX kill-session -t "$SESSION" 2>/dev/null || true
+        else
+            # Incremental update
+            local current_windows=()
+            while IFS= read -r wname; do
+                current_windows+=("$wname")
+            done < <($TX list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null)
+
+            local added=()
+            for entry in "${entries[@]}"; do
+                local sess_name
+                sess_name=$(tmux_session_name "$entry")
+                [[ -z "$sess_name" ]] && continue
+                $TX has-session -t "$sess_name" 2>/dev/null || continue
+
+                local found=false
+                for w in "${current_windows[@]}"; do
+                    [[ "$w" == "$entry" ]] && { found=true; break; }
+                done
+
+                if [[ "$found" == false ]]; then
+                    $TX link-window -s "${sess_name}:0" -t "${SESSION}:" 2>/dev/null || continue
+                    local win
+                    win=$($TX list-windows -t "$SESSION" -F '#{window_index}' | tail -1)
+                    $TX rename-window -t "${SESSION}:${win}" "$entry"
+                    added+=("$entry")
+                fi
+            done
+
+            # Remove windows not in roster
+            while IFS=$'\t' read -r wname windex; do
+                [[ "$wname" == "placeholder" ]] && continue
+                local in_roster=false
+                for e in "${entries[@]}"; do
+                    [[ "$e" == "$wname" ]] && { in_roster=true; break; }
+                done
+                if [[ "$in_roster" == false ]]; then
+                    $TX unlink-window -t "${SESSION}:${windex}" 2>/dev/null || true
+                fi
+            done < <($TX list-windows -t "$SESSION" -F '#{window_name}\t#{window_index}' 2>/dev/null)
+
+            [[ ${#added[@]} -gt 0 ]] && echo "Added: ${added[*]}"
+            echo "Town hall updated"
+            return
+        fi
+    fi
+
+    # Fresh build
+    $TX new-session -d -s "$SESSION"
+    local linked=0
+
+    for entry in "${entries[@]}"; do
+        local sess_name
+        sess_name=$(tmux_session_name "$entry")
+        [[ -z "$sess_name" ]] && continue
+        $TX has-session -t "$sess_name" 2>/dev/null || continue
+
+        $TX link-window -s "${sess_name}:0" -t "${SESSION}:" 2>/dev/null || continue
+        local win
+        win=$($TX list-windows -t "$SESSION" -F '#{window_index}' | tail -1)
+        $TX rename-window -t "${SESSION}:${win}" "$entry"
+        ((linked++))
+    done
+
+    # Kill the default empty window
+    $TX kill-window -t "${SESSION}:0" 2>/dev/null || true
+
+    echo "Assembled $linked sessions → $SESSION"
+}
+
+# Refresh the view session if it exists (no-op otherwise)
+refresh_view() {
+    $TX has-session -t "$VIEW_SESSION" 2>/dev/null || return 0
+    cmd_view --refresh
+}
+
+# Set up bare-key navigation on the view session
+setup_view_keys() {
+    local kt="thv-keys"
+
+    # Arrow keys navigate panes, stay in bare-key mode
+    $TX bind-key -T "$kt" Up    select-pane -U \; switch-client -T "$kt"
+    $TX bind-key -T "$kt" Down  select-pane -D \; switch-client -T "$kt"
+    $TX bind-key -T "$kt" Left  select-pane -L \; switch-client -T "$kt"
+    $TX bind-key -T "$kt" Right select-pane -R \; switch-client -T "$kt"
+    $TX bind-key -T "$kt" k     select-pane -U \; switch-client -T "$kt"
+    $TX bind-key -T "$kt" j     select-pane -D \; switch-client -T "$kt"
+    $TX bind-key -T "$kt" h     select-pane -L \; switch-client -T "$kt"
+    $TX bind-key -T "$kt" l     select-pane -R \; switch-client -T "$kt"
+
+    # Enter: jump to the member's real session in town-hall
+    $TX bind-key -T "$kt" Enter run-shell \
+        "$TX switch-client -t '#{pane_title}'"
+
+    # q: back to town-hall (exits bare-key mode automatically)
+    $TX bind-key -T "$kt" q switch-client -t "$SESSION"
+
+    # Global: prefix-h jumps to the view and enters bare-key mode
+    $TX bind-key h switch-client -t "$VIEW_SESSION" \; switch-client -T "$kt"
+}
+
+cmd_view() {
+    local force=false
+    local refresh=false
+    for arg in "$@"; do
+        [[ "$arg" == "--force" ]]   && force=true
+        [[ "$arg" == "--refresh" ]] && refresh=true
+    done
+
+    local entries
+    mapfile -t entries < <(read_roster)
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        echo "Town hall is empty. Use 'town-hall enter <member>' to add someone."
+        return
+    fi
+
+    # Refresh: only act if view already exists
+    if [[ "$refresh" == true ]] && ! $TX has-session -t "$VIEW_SESSION" 2>/dev/null; then
+        return
+    fi
+
+    # Tear down existing view if force or refresh
+    if $TX has-session -t "$VIEW_SESSION" 2>/dev/null; then
+        if [[ "$force" == true || "$refresh" == true ]]; then
+            $TX kill-session -t "$VIEW_SESSION" 2>/dev/null || true
+        else
+            echo "View already running. Use --force to rebuild, or prefix-h to switch."
+            return
+        fi
+    fi
+
+    # Build tiled view — one pane per roster member with a capture loop
+    local first=true
+    local count=0
+
+    for entry in "${entries[@]}"; do
+        local sess_name
+        sess_name=$(tmux_session_name "$entry")
+        [[ -z "$sess_name" ]] && continue
+
+        # Each pane: clear, print header, capture target pane, sleep, repeat
+        local loop
+        loop="while true; do printf '\\033[2J\\033[H'; printf '\\033[7m %-35s \\033[0m\\n' '$entry'; $TX capture-pane -t '$sess_name' -p -S -40 2>/dev/null || echo '(no session)'; sleep 2; done"
+
+        if [[ "$first" == true ]]; then
+            $TX new-session -d -s "$VIEW_SESSION" -x 200 -y 50 "bash" "-c" "$loop"
+            first=false
+        else
+            $TX split-window -t "$VIEW_SESSION" "bash" "-c" "$loop"
+        fi
+
+        # Tag pane with target session so Enter can jump there
+        $TX select-pane -t "$VIEW_SESSION" -T "$sess_name"
+        ((count++))
+    done
+
+    if [[ "$first" == true ]]; then
+        echo "No viewable sessions."
+        return
+    fi
+
+    # Tile evenly and set up keybindings
+    $TX select-layout -t "$VIEW_SESSION" tiled
+    setup_view_keys
+
+    [[ "$refresh" != true ]] && echo "View: $count panes → $VIEW_SESSION (prefix-h to switch)"
+}
+
+# --- Main ---
+
+case "${1:-}" in
+    enter)
+        shift
+        cmd_enter "$@"
+        ;;
+    leave)
+        shift
+        cmd_leave "$@"
+        ;;
+    assemble)
+        shift
+        cmd_assemble "$@"
+        ;;
+    view)
+        shift
+        cmd_view "$@"
+        ;;
+    list|"")
+        cmd_list
+        ;;
+    -h|--help)
+        echo "Usage: town-hall [enter|leave|assemble|view|list]"
+        echo ""
+        echo "  (no args)             List roster with live status"
+        echo "  enter <member> [rig]  Add member to roster + link tmux window"
+        echo "  leave <member>        Remove member from roster + unlink window"
+        echo "  assemble [--force]    Build/rebuild tmux session from roster"
+        echo "  view [--force]        Tiled read-only overview (auto-refreshes on enter/leave)"
+        echo ""
+        echo "View keybindings (bare keys, no prefix needed):"
+        echo "  Enter       Jump to member's session in town-hall"
+        echo "  q           Back to town-hall"
+        echo "  arrows/hjkl Navigate panes"
+        echo "  prefix-h    Switch to view from anywhere"
+        echo ""
+        echo "Roster file: $ROSTER_FILE"
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Run 'town-hall --help' for usage"
+        exit 1
+        ;;
+esac
