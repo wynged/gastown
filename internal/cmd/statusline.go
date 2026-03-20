@@ -674,7 +674,15 @@ func getHookedWork(identity string, maxLen int, beadsDir string) string {
 
 	b := beads.New(beadsDir)
 
-	// Query for hooked beads assigned to this agent
+	// Try to find the focus bead first (labeled "focus")
+	focusBeads, _ := b.List(beads.ListOptions{
+		Status:   beads.StatusHooked,
+		Assignee: identity,
+		Label:    "focus",
+		Priority: -1,
+	})
+
+	// Get all hooked beads for the total count
 	hookedBeads, err := b.List(beads.ListOptions{
 		Status:   beads.StatusHooked,
 		Assignee: identity,
@@ -684,13 +692,16 @@ func getHookedWork(identity string, maxLen int, beadsDir string) string {
 		return ""
 	}
 
-	// Sort by UpdatedAt ascending to get the oldest hook (the focus bead)
-	sort.Slice(hookedBeads, func(i, j int) bool {
-		return hookedBeads[i].UpdatedAt < hookedBeads[j].UpdatedAt
-	})
-
-	// Show oldest hooked bead (focus) + count of extras (stale handoffs)
-	bead := hookedBeads[0]
+	// Prefer focus bead; fall back to oldest hook
+	var bead *beads.Issue
+	if len(focusBeads) > 0 {
+		bead = focusBeads[0]
+	} else {
+		sort.Slice(hookedBeads, func(i, j int) bool {
+			return hookedBeads[i].UpdatedAt < hookedBeads[j].UpdatedAt
+		})
+		bead = hookedBeads[0]
+	}
 	display := fmt.Sprintf("%s: %s", bead.ID, bead.Title)
 	if len(hookedBeads) > 1 {
 		suffix := fmt.Sprintf(" +%d", len(hookedBeads)-1)
