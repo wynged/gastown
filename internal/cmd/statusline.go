@@ -684,12 +684,12 @@ func getHookedWork(identity string, maxLen int, beadsDir string) string {
 		return ""
 	}
 
-	// Sort by UpdatedAt descending to get the most recent hook
+	// Sort by UpdatedAt ascending to get the oldest hook (the focus bead)
 	sort.Slice(hookedBeads, func(i, j int) bool {
-		return hookedBeads[i].UpdatedAt > hookedBeads[j].UpdatedAt
+		return hookedBeads[i].UpdatedAt < hookedBeads[j].UpdatedAt
 	})
 
-	// Show most recent hooked bead + count of extras
+	// Show oldest hooked bead (focus) + count of extras (stale handoffs)
 	bead := hookedBeads[0]
 	display := fmt.Sprintf("%s: %s", bead.ID, bead.Title)
 	if len(hookedBeads) > 1 {
