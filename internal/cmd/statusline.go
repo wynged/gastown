@@ -369,7 +369,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 	// Priority 1: Check for hooked work (town beads for mayor)
 	hookedWork := ""
 	if townRoot != "" {
-		hookedWork = getHookedWork("mayor", 40, townRoot)
+		hookedWork = getHookedWork("mayor/", 40, townRoot)
 	}
 	if hookedWork != "" {
 		parts = append(parts, fmt.Sprintf("🪝 %s", hookedWork))
@@ -438,7 +438,7 @@ func runDeaconStatusLine(t *tmux.Tmux) error {
 	// Priority 1: Check for hooked work (town beads for deacon)
 	hookedWork := ""
 	if townRoot != "" {
-		hookedWork = getHookedWork("deacon", 35, townRoot)
+		hookedWork = getHookedWork("deacon/", 35, townRoot)
 	}
 	if hookedWork != "" {
 		parts = append(parts, fmt.Sprintf("🪝 %s", hookedWork))
