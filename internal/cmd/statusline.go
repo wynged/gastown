@@ -684,10 +684,22 @@ func getHookedWork(identity string, maxLen int, beadsDir string) string {
 		return ""
 	}
 
-	// Return first hooked bead's ID and title, truncated
+	// Sort by UpdatedAt descending to get the most recent hook
+	sort.Slice(hookedBeads, func(i, j int) bool {
+		return hookedBeads[i].UpdatedAt > hookedBeads[j].UpdatedAt
+	})
+
+	// Show most recent hooked bead + count of extras
 	bead := hookedBeads[0]
 	display := fmt.Sprintf("%s: %s", bead.ID, bead.Title)
-	if len(display) > maxLen {
+	if len(hookedBeads) > 1 {
+		suffix := fmt.Sprintf(" +%d", len(hookedBeads)-1)
+		// Reserve space for the suffix when truncating
+		if len(display)+len(suffix) > maxLen {
+			display = display[:maxLen-len(suffix)-1] + "…"
+		}
+		display += suffix
+	} else if len(display) > maxLen {
 		display = display[:maxLen-1] + "…"
 	}
 	return display
